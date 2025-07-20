@@ -39,26 +39,89 @@ function M.open()
     exec_genie_command('genie')
 end
 
+local function get_context()
+    local context = ""
+    local file_path = vim.fn.expand("%:p")
+    
+    -- Add file reference if we have one
+    if file_path ~= "" then
+        local relative_path = vim.fn.fnamemodify(file_path, ":~:.")
+        context = context .. "File: " .. relative_path .. "\n\n"
+        
+        -- Add file content
+        local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+        if #lines > 0 then
+            context = context .. "```" .. vim.bo.filetype .. "\n"
+            context = context .. table.concat(lines, "\n") .. "\n"
+            context = context .. "```\n\n"
+        end
+    end
+    
+    -- Check for visual selection
+    local mode = vim.fn.mode()
+    if mode:match("[vV]") then
+        local start_pos = vim.fn.getpos("'<")
+        local end_pos = vim.fn.getpos("'>")
+        local start_line = start_pos[2] - 1
+        local end_line = end_pos[2]
+        
+        local selected_lines = vim.api.nvim_buf_get_lines(0, start_line, end_line, false)
+        
+        if mode == 'v' then -- Visual character mode
+            selected_lines[1] = string.sub(selected_lines[1], start_pos[3])
+            selected_lines[#selected_lines] = string.sub(selected_lines[#selected_lines], 1, end_pos[3])
+        end
+        
+        if #selected_lines > 0 then
+            context = context .. "Selected code:\n```" .. vim.bo.filetype .. "\n"
+            context = context .. table.concat(selected_lines, "\n") .. "\n"
+            context = context .. "```\n\n"
+        end
+    end
+    
+    return context
+end
+
 function M.ask(prompt)
-    local cmd = {'genie', 'ask', prompt}
-    vim.fn.jobstart(cmd, {
-        on_stdout = function(_, data)
-            if data and #data > 0 and data[1] ~= "" then
+    local context = get_context()
+    local full_prompt = context .. "Question: " .. prompt
+    
+    -- If no context, just use the prompt directly
+    if context == "" then
+        full_prompt = prompt
+    end
+    
+    -- Show progress notification
+    vim.notify("Genie: Thinking...", vim.log.levels.INFO)
+    
+    vim.system({'genie', 'ask', full_prompt}, {
+        text = true,
+    }, function(result)
+        if result.code == 0 and result.stdout then
+            vim.schedule(function()
+                local lines = vim.split(result.stdout, "\n")
                 local buf = vim.api.nvim_create_buf(false, true)
-                vim.api.nvim_buf_set_lines(buf, 0, -1, false, data)
+                vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
                 vim.cmd('new')
                 vim.api.nvim_set_current_buf(buf)
                 vim.bo[buf].buftype = 'nofile'
                 vim.bo[buf].bufhidden = 'wipe'
                 vim.bo[buf].modifiable = false
-            end
-        end,
-        on_stderr = function(_, data)
-            if data and #data > 0 and data[1] ~= "" then
-                vim.notify("Genie error: " .. table.concat(data, "\n"), vim.log.levels.ERROR)
-            end
+                vim.bo[buf].filetype = 'markdown'
+            end)
+        else
+            vim.schedule(function()
+                if result.code ~= 0 then
+                    vim.notify("Genie failed with exit code: " .. result.code, vim.log.levels.ERROR)
+                    if result.stderr then
+                        vim.notify("Error: " .. result.stderr, vim.log.levels.ERROR)
+                    end
+                else
+                    vim.notify("Genie: No output received", vim.log.levels.WARN)
+                end
+            end)
         end
-    })
+    end)
 end
 
 function M.setup(opts)
